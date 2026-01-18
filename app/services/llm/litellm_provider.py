@@ -64,6 +64,8 @@ class LiteLLMVisionProvider(VisionModelProvider):
         # 从 model_name 中提取 provider 名称（如 "gemini/gemini-2.0-flash"）
         if "/" in self.model_name:
             return self.model_name.split("/")[0]
+        if getattr(self, "base_url", None) and "openrouter" in self.base_url.lower():
+            return "openrouter"
         return "litellm"
 
     @property
@@ -112,7 +114,8 @@ class LiteLLMVisionProvider(VisionModelProvider):
             "dashscope": "DASHSCOPE_API_KEY",
             "siliconflow": "SILICONFLOW_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
-            "claude": "ANTHROPIC_API_KEY"
+            "claude": "ANTHROPIC_API_KEY",
+            "openrouter": "OPENAI_API_KEY"  # OpenRouter uses OpenAI-compatible API
         }
 
         env_var = env_key_mapping.get(provider, f"{provider.upper()}_API_KEY")
@@ -126,6 +129,9 @@ class LiteLLMVisionProvider(VisionModelProvider):
             # LiteLLM 支持通过 api_base 参数设置自定义 URL
             self._api_base = self.base_url
             logger.debug(f"使用自定义 API base URL: {self.base_url}")
+        
+        # 保存 api_key 用于直接传递（某些 provider 需要）
+        self._api_key = self.api_key
 
     async def analyze_images(self,
                            images: List[Union[str, Path, PIL.Image.Image]],
@@ -189,8 +195,19 @@ class LiteLLMVisionProvider(VisionModelProvider):
             # 准备参数
             effective_model_name = self.model_name
             
+            # OpenRouter 特殊处理
+            is_openrouter = self.provider_name.lower() == "openrouter"
+            if is_openrouter:
+                # OpenRouter 使用 OpenAI 兼容 API，但模型名称需要保持 openrouter/ 前缀
+                # LiteLLM 会自动识别 openrouter/ 前缀并正确处理
+                if self.model_name.lower().startswith("openrouter/"):
+                    effective_model_name = self.model_name
+                else:
+                    effective_model_name = f"openrouter/{self.model_name}"
+                logger.debug(f"使用 OpenRouter 视觉模型: {effective_model_name}")
+            
             # SiliconFlow 特殊处理
-            if self.model_name.lower().startswith("siliconflow/"):
+            elif self.model_name.lower().startswith("siliconflow/"):
                 # 替换 provider 为 openai
                 if "/" in self.model_name:
                     effective_model_name = f"openai/{self.model_name.split('/', 1)[1]}"
@@ -220,6 +237,10 @@ class LiteLLMVisionProvider(VisionModelProvider):
             # 支持动态传递 api_key 和 api_base
             if "api_key" in kwargs:
                 completion_kwargs["api_key"] = kwargs["api_key"]
+            elif hasattr(self, '_api_key') and self._api_key:
+                # 如果没有通过 kwargs 传递，使用实例的 api_key
+                # 这对于 OpenRouter 等需要直接传递 api_key 的 provider 很重要
+                completion_kwargs["api_key"] = self._api_key
             if "api_base" in kwargs:
                 completion_kwargs["api_base"] = kwargs["api_base"]
 
@@ -271,6 +292,8 @@ class LiteLLMTextProvider(TextModelProvider):
         # 从 model_name 中提取 provider 名称
         if "/" in self.model_name:
             return self.model_name.split("/")[0]
+        if getattr(self, "base_url", None) and "openrouter" in self.base_url.lower():
+            return "openrouter"
         # 尝试从模型名称推断 provider
         model_lower = self.model_name.lower()
         if "gpt" in model_lower:
@@ -332,7 +355,8 @@ class LiteLLMTextProvider(TextModelProvider):
             "deepseek": "DEEPSEEK_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "claude": "ANTHROPIC_API_KEY",
-            "moonshot": "MOONSHOT_API_KEY"
+            "moonshot": "MOONSHOT_API_KEY",
+            "openrouter": "OPENAI_API_KEY"  # OpenRouter uses OpenAI-compatible API
         }
 
         env_var = env_key_mapping.get(provider, f"{provider.upper()}_API_KEY")
@@ -345,6 +369,9 @@ class LiteLLMTextProvider(TextModelProvider):
         if self.base_url:
             self._api_base = self.base_url
             logger.debug(f"使用自定义 API base URL: {self.base_url}")
+        
+        # 保存 api_key 用于直接传递（某些 provider 需要）
+        self._api_key = self.api_key
 
     async def generate_text(self,
                           prompt: str,
@@ -373,8 +400,19 @@ class LiteLLMTextProvider(TextModelProvider):
         # 准备参数
         effective_model_name = self.model_name
         
+        # OpenRouter 特殊处理
+        is_openrouter = self.provider_name.lower() == "openrouter"
+        if is_openrouter:
+            # OpenRouter 使用 OpenAI 兼容 API，但模型名称需要保持 openrouter/ 前缀
+            # LiteLLM 会自动识别 openrouter/ 前缀并正确处理
+            if self.model_name.lower().startswith("openrouter/"):
+                effective_model_name = self.model_name
+            else:
+                effective_model_name = f"openrouter/{self.model_name}"
+            logger.debug(f"使用 OpenRouter 模型: {effective_model_name}")
+        
         # SiliconFlow 特殊处理
-        if self.model_name.lower().startswith("siliconflow/"):
+        elif self.model_name.lower().startswith("siliconflow/"):
             # 替换 provider 为 openai
             if "/" in self.model_name:
                 effective_model_name = f"openai/{self.model_name.split('/', 1)[1]}"
@@ -409,15 +447,34 @@ class LiteLLMTextProvider(TextModelProvider):
                 logger.warning(f"模型可能不支持 response_format，将在提示词中添加 JSON 约束: {str(e)}")
                 messages[-1]["content"] += "\n\n请确保输出严格的JSON格式，不要包含任何其他文字或标记。"
 
-        # 如果有自定义 base_url，添加 api_base 参数
-        if hasattr(self, '_api_base'):
-            completion_kwargs["api_base"] = self._api_base
+        # OpenRouter 特殊处理：需要设置 api_base 和 api_key
+        if is_openrouter:
+            # OpenRouter 必须设置 api_base
+            if hasattr(self, '_api_base') and self._api_base:
+                completion_kwargs["api_base"] = self._api_base
+            elif "api_base" not in kwargs:
+                # 如果没有设置，使用默认的 OpenRouter API URL
+                completion_kwargs["api_base"] = "https://openrouter.ai/api/v1"
+            
+            # OpenRouter 必须设置 api_key
+            if "api_key" in kwargs:
+                completion_kwargs["api_key"] = kwargs["api_key"]
+            elif hasattr(self, '_api_key') and self._api_key:
+                completion_kwargs["api_key"] = self._api_key
+            
+            logger.debug(f"OpenRouter 配置: api_base={completion_kwargs.get('api_base')}, model={effective_model_name}")
+        else:
+            # 其他 provider 的处理
+            if hasattr(self, '_api_base'):
+                completion_kwargs["api_base"] = self._api_base
 
-        # 支持动态传递 api_key 和 api_base (修复认证问题)
-        if "api_key" in kwargs:
-            completion_kwargs["api_key"] = kwargs["api_key"]
-        if "api_base" in kwargs:
-            completion_kwargs["api_base"] = kwargs["api_base"]
+            # 支持动态传递 api_key 和 api_base
+            if "api_key" in kwargs:
+                completion_kwargs["api_key"] = kwargs["api_key"]
+            elif hasattr(self, '_api_key') and self._api_key:
+                completion_kwargs["api_key"] = self._api_key
+            if "api_base" in kwargs:
+                completion_kwargs["api_base"] = kwargs["api_base"]
 
         try:
             # 调用 LiteLLM（自动重试）
@@ -443,20 +500,38 @@ class LiteLLMTextProvider(TextModelProvider):
             raise RateLimitError()
         except LiteLLMBadRequestError as e:
             error_msg = str(e)
-            # 处理不支持 response_format 的情况
-            if "response_format" in error_msg and response_format == "json":
-                logger.warning(f"模型不支持 response_format，重试不带格式约束的请求")
+            logger.error(f"LiteLLM BadRequest 错误: {error_msg}")
+            
+            # 处理不支持 response_format 或参数无效的情况
+            # 检查是否是参数相关错误（包括 response_format、Invalid API parameter 等）
+            is_param_error = (
+                "response_format" in error_msg.lower() or 
+                "invalid api parameter" in error_msg.lower() or
+                "parameter" in error_msg.lower() and "invalid" in error_msg.lower() or
+                "unsupported" in error_msg.lower() and "parameter" in error_msg.lower()
+            )
+            
+            # 对于 OpenRouter，特别处理参数错误
+            if is_openrouter:
+                logger.warning(f"OpenRouter 模型参数错误，可能是模型不支持某些参数: {error_msg[:300]}")
+            
+            if is_param_error and response_format == "json" and "response_format" in completion_kwargs:
+                logger.warning(f"模型不支持 response_format 参数，重试不带格式约束的请求: {error_msg[:200]}")
                 completion_kwargs.pop("response_format", None)
                 messages[-1]["content"] += "\n\n请确保输出严格的JSON格式，不要包含任何其他文字或标记。"
 
                 # 重试
-                response = await acompletion(**completion_kwargs)
-                if response.choices and len(response.choices) > 0:
-                    content = response.choices[0].message.content
-                    content = self._clean_json_output(content)
-                    return content
-                else:
-                    raise APICallError("LiteLLM 返回空响应")
+                try:
+                    response = await acompletion(**completion_kwargs)
+                    if response.choices and len(response.choices) > 0:
+                        content = response.choices[0].message.content
+                        content = self._clean_json_output(content)
+                        return content
+                    else:
+                        raise APICallError("LiteLLM 返回空响应")
+                except Exception as retry_error:
+                    logger.error(f"重试后仍然失败: {str(retry_error)}")
+                    raise APICallError(f"请求错误（已尝试移除不支持的参数）: {str(retry_error)}")
 
             # 检查是否是安全过滤
             if "SAFETY" in error_msg.upper() or "content_filter" in error_msg.lower():

@@ -401,12 +401,18 @@ def generate_script_docu(params):
                 # 整理帧分析数据
                 markdown_output = parse_frame_analysis_to_markdown(analysis_json_path)
 
+                # 获取自定义提示词（如果用户提供了）
+                custom_prompt = st.session_state.get('custom_prompt', '').strip()
+                if custom_prompt:
+                    logger.info(f"使用自定义提示词: {custom_prompt[:100]}...")
+
                 # 生成解说文案
                 narration = generate_narration(
                     markdown_output,
                     text_api_key,
                     base_url=text_base_url,
-                    model=text_model
+                    model=text_model,
+                    custom_prompt=custom_prompt
                 )
 
                 # 使用增强的JSON解析器

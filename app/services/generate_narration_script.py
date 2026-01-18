@@ -84,7 +84,7 @@ def parse_frame_analysis_to_markdown(json_file_path):
         return f"处理JSON文件时出错: {traceback.format_exc()}"
 
 
-def generate_narration(markdown_content, api_key, base_url, model):
+def generate_narration(markdown_content, api_key, base_url, model, custom_prompt=None):
     """
     调用大模型API根据视频帧分析的Markdown内容生成解说文案 - 已重构为使用新的LLM服务架构
 
@@ -92,19 +92,34 @@ def generate_narration(markdown_content, api_key, base_url, model):
     :param api_key: API密钥
     :param base_url: API基础URL
     :param model: 使用的模型名称
+    :param custom_prompt: 用户自定义提示词（可选）
     :return: 生成的解说文案
     """
     try:
         # 优先使用新的LLM服务架构
-        logger.info("使用新的LLM服务架构生成解说文案")
-        result = generate_narration_new(markdown_content, api_key, base_url, model)
+        logger.info(f"使用新的LLM服务架构生成解说文案，模型: {model}")
+        result = generate_narration_new(markdown_content, api_key, base_url, model, custom_prompt)
         return result
 
     except Exception as e:
-        logger.warning(f"使用新LLM服务失败，回退到旧实现: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"使用新LLM服务失败: {error_msg}")
 
+        # 如果是 OpenRouter 相关错误，提供更详细的错误信息
+        if "openrouter" in model.lower() or "openrouter" in error_msg.lower():
+            logger.warning("检测到 OpenRouter 模型调用失败，可能的原因：")
+            logger.warning("1. 模型名称格式不正确（应为 openrouter/model-id）")
+            logger.warning("2. API Key 无效或余额不足")
+            logger.warning("3. 模型不支持某些参数（如 response_format）")
+            logger.warning("4. 网络连接问题")
+        
         # 回退到旧的实现以确保兼容性
-        return _generate_narration_legacy(markdown_content, api_key, base_url, model)
+        logger.info("尝试使用旧实现作为备用方案...")
+        try:
+            return _generate_narration_legacy(markdown_content, api_key, base_url, model)
+        except Exception as legacy_error:
+            logger.error(f"旧实现也失败: {type(legacy_error).__name__}")
+            raise Exception("所有生成方案都失败，请检查模型配置或网络连接。")
 
 
 def _generate_narration_legacy(markdown_content, api_key, base_url, model):
@@ -139,18 +154,36 @@ def _generate_narration_legacy(markdown_content, api_key, base_url, model):
             base_url=base_url
         )
         
+        # 处理 OpenRouter 模型名称：移除 openrouter/ 前缀
+        model_id = model
+        if model_id.startswith("openrouter/"):
+            model_id = model_id.replace("openrouter/", "", 1)
+            logger.debug(f"OpenRouter 模型名称处理: {model} -> {model_id}")
+        
         # 使用SDK发送请求
-        if model not in ["deepseek-reasoner"]:
+        if model_id not in ["deepseek-reasoner"]:
             # deepseek-reasoner 不支持 json 输出
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "你是一名专业的短视频解说文案撰写专家。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=1.5,
-                response_format={"type": "json_object"},
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "system", "content": "你是一名专业的短视频解说文案撰写专家。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=1.5,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as format_error:
+                # 如果 response_format 不支持，重试不带该参数
+                logger.warning(f"模型可能不支持 response_format，重试不带该参数: {str(format_error)}")
+                response = client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "system", "content": "你是一名专业的短视频解说文案撰写专家。"},
+                        {"role": "user", "content": prompt + "\n\n请确保输出严格的JSON格式，不要包含任何其他文字或标记。"}
+                    ],
+                    temperature=1.5,
+                )
             # 提取生成的文案
             if response.choices and len(response.choices) > 0:
                 narration_script = response.choices[0].message.content
@@ -162,7 +195,7 @@ def _generate_narration_legacy(markdown_content, api_key, base_url, model):
         else:
             # 不支持 json 输出，需要多一步处理 ```json ``` 的步骤
             response = client.chat.completions.create(
-                model=model,
+                model=model_id,
                 messages=[
                     {"role": "system", "content": "你是一名专业的短视频解说文案撰写专家。"},
                     {"role": "user", "content": prompt}
@@ -181,7 +214,9 @@ def _generate_narration_legacy(markdown_content, api_key, base_url, model):
                 return "生成解说文案失败: 未获取到有效响应"
     
     except Exception as e:
-        return f"调用API生成解说文案时出错: {traceback.format_exc()}"
+        error_msg = str(e)
+        logger.error(f"调用API生成解说文案时出错: {error_msg}")
+        return "调用API生成解说文案时出错，请检查模型配置或网络连接。"
 
 
 if __name__ == '__main__':
